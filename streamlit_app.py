@@ -1,106 +1,86 @@
 import streamlit as st
-import pandas as pd
 import xarray as xr
-import cfgrib
+import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import requests
 import os
-import tempfile
+import cfgrib
+from datetime import datetime, timedelta
 
-# ========================
-# KONFIGURASI
-# ========================
-MODEL = "GFS 0.25°"
-LAT_MIN, LAT_MAX = -11, 6
-LON_MIN, LON_MAX = 94, 141
-FORECAST_DAYS = 5
-STEP_HOURS = 3
+# -------------------------------
+# CONFIG
+# -------------------------------
+MODEL_BASE_URL = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/"
+RESOLUTION = "0p25"
+FORECAST_HOUR = 3
+LAT_RANGE = (-11, 6)
+LON_RANGE = (94, 141)
 
-# ========================
-# FUNGSI UTILITAS
-# ========================
-def safe_open_grib(url, filter_keys):
+# -------------------------------
+# HELPER FUNCTIONS
+# -------------------------------
+def get_latest_run():
+    now = datetime.utcnow()
+    for offset in range(0, 24, 6):  
+        run_time = now - timedelta(hours=offset)
+        run_str = run_time.strftime("%Y%m%d/%H")
+        url = f"{MODEL_BASE_URL}gfs.{run_time.strftime('%Y%m%d')}/{run_time.strftime('%H')}/atmos/"
+        try:
+            r = requests.head(url, timeout=5)
+            if r.status_code == 200:
+                return run_time
+        except:
+            pass
+    return None
+
+def load_gfs_param(run_time, filter_keys, var_candidates):
+    f003 = f"gfs.t{run_time.strftime('%H')}z.pgrb2.{RESOLUTION}.f{FORECAST_HOUR:03d}"
+    url = f"{MODEL_BASE_URL}gfs.{run_time.strftime('%Y%m%d')}/{run_time.strftime('%H')}/atmos/{f003}"
     try:
         ds = xr.open_dataset(url, engine="cfgrib", backend_kwargs={"filter_by_keys": filter_keys})
-        return ds
+        for var in var_candidates:
+            if var in ds:
+                return ds[var]
     except Exception as e:
         st.warning(f"⚠️ Gagal load {filter_keys}: {e}")
-        return None
+    return None
 
-def concat_time(ds_list):
-    """Gabungkan list dataset dengan perbaikan time-step jika ada"""
-    valid_ds = []
-    for ds in ds_list:
-        if ds is None:
-            continue
-        try:
-            if "step" in ds and "time" in ds:
-                times = pd.to_datetime(ds["time"].values) + pd.to_timedelta(ds["step"].values)
-            else:
-                times = pd.to_datetime(ds["time"].values)
-            ds = ds.assign_coords(valid_time=("time", times))
-            valid_ds.append(ds)
-        except Exception as e:
-            st.warning(f"⚠️ Gagal proses waktu: {e}")
-    if valid_ds:
-        return xr.concat(valid_ds, dim="time")
-    else:
-        return None
+# -------------------------------
+# STREAMLIT UI
+# -------------------------------
+st.set_page_config(page_title="🌧️ Dashboard Cuaca GFS Indonesia", layout="wide")
 
-def load_parameter(local_paths, filter_keys, var_candidates):
-    ds_list = []
-    for path in local_paths:
-        ds = safe_open_grib(path, filter_keys)
-        if ds is not None:
-            for var in var_candidates:
-                if var in ds.variables:
-                    ds = ds[[var]]
-                    break
-            ds_list.append(ds)
-    return concat_time(ds_list)
+st.title("🌧️ Dashboard Parameter Cuaca 3 Jam-an — IBF Helper (GFS 0.25°)")
 
-# ========================
-# STREAMLIT DASHBOARD
-# ========================
-st.set_page_config(page_title="Dashboard Cuaca 3 Jam-an — IBF Helper", layout="wide")
-st.title(f"🌧️ Dashboard Parameter Cuaca 3 Jam-an — IBF Helper ({MODEL})")
+st.write("Memuat parameter... ini bisa memakan waktu beberapa detik per parameter.")
 
-st.write(f"**Wilayah:** Indonesia ({LAT_MIN}° s/d {LAT_MAX}° Lat, {LON_MIN}° s/d {LON_MAX}° Lon)")
+run_time = get_latest_run()
+if not run_time:
+    st.error("Tidak ada run GFS terbaru yang tersedia.")
+    st.stop()
 
-# ========================
-# DOWNLOAD & LOAD DATA
-# ========================
-base_url = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod"
-run_date = pd.Timestamp.utcnow().strftime("%Y%m%d")
-run_hour = "00"  # bisa diubah ke "06", "12", "18" jika mau
-hours = list(range(STEP_HOURS, FORECAST_DAYS * 24 + STEP_HOURS, STEP_HOURS))
+st.success(f"Model GFS {RESOLUTION} | Run: {run_time.strftime('%Y-%m-%d %H UTC')}")
 
-local_paths = []
-for h in hours:
-    url = f"{base_url}/gfs.{run_date}/{run_hour}/atmos/gfs.t{run_hour}z.pgrb2.0p25.f{h:03d}"
-    local_paths.append(url)
-
-# ========================
-# LOAD PARAMETER
-# ========================
-st.info("Memuat parameter... ini bisa memakan waktu beberapa detik per parameter.")
-
+# Load parameters
 params = {
-    "Suhu 2m (°C)": {"keys": {"typeOfLevel": "heightAboveGround", "level": 2}, "vars": ["t2m", "2t", "t"], "scale": lambda x: x - 273.15},
-    "Curah Hujan (mm)": {"keys": {"typeOfLevel": "surface"}, "vars": ["tp", "prate"], "scale": lambda x: x * 1000},
-    "Angin 10m (m/s)": {"keys": {"typeOfLevel": "heightAboveGround", "level": 10}, "vars": ["10u", "u10"], "scale": None},
-    "Tutupan Awan (%)": {"keys": {"typeOfLevel": "cloud"}, "vars": ["tcc", "cloud"], "scale": lambda x: x * 100},
+    "Suhu 2m (°C)": load_gfs_param(run_time, {"typeOfLevel": "heightAboveGround", "level": 2}, ["t2m", "2t", "t"]),
+    "Curah Hujan (mm)": load_gfs_param(run_time, {"typeOfLevel": "surface"}, ["tp", "prate", "precip"]),
+    "Angin 10m (m/s)": load_gfs_param(run_time, {"typeOfLevel": "heightAboveGround", "level": 10}, ["10u", "u10", "v10"]),
+    "Tutupan Awan (%)": load_gfs_param(run_time, {"typeOfLevel": "cloud"}, ["tcc", "cloud"]),
+    "Visibility (m)": load_gfs_param(run_time, {"typeOfLevel": "surface"}, ["vis"]),
 }
 
-for pname, pinfo in params.items():
-    ds_param = load_parameter(local_paths, pinfo["keys"], pinfo["vars"])
-    if ds_param is None:
-        st.error(f"Data {pname} tidak tersedia.")
-        continue
-    varname = list(ds_param.data_vars)[0]
-    data = ds_param[varname].sel(latitude=slice(LAT_MAX, LAT_MIN), longitude=slice(LON_MIN, LON_MAX))
-    if pinfo["scale"]:
-        data = pinfo["scale"](data)
-    st.subheader(pname)
-    st.write(data.isel(time=0).plot())
+for name, data in params.items():
+    if data is None:
+        st.warning(f"Data {name} tidak tersedia.")
+    else:
+        st.subheader(name)
+        plt.figure(figsize=(8, 6))
+        ax = plt.axes(projection=ccrs.PlateCarree())
+        ax.coastlines()
+        data.plot(ax=ax, transform=ccrs.PlateCarree())
+        st.pyplot(plt)
 
 st.success("✅ Selesai memuat parameter cuaca")
