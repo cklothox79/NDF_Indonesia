@@ -1,7 +1,9 @@
 streamlit
+cfgrib
 xarray
-netCDF4
 pandas
 numpy
-plotly
-cfgrib
+matplotlib
+cartopy
+requests
+pygrib
