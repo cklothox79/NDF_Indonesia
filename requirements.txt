@@ -1,0 +1,7 @@
+streamlit
+xarray
+netCDF4
+pandas
+numpy
+plotly
+cfgrib
