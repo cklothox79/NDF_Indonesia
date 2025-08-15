@@ -1,79 +1,74 @@
 import streamlit as st
 import xarray as xr
-import pandas as pd
 import numpy as np
-import requests
-import os
-from datetime import datetime
+import pandas as pd
+import cfgrib
 
-# ==========================
-# Konfigurasi
-# ==========================
+# --------------------------
+# Konfigurasi Wilayah & Model
+# --------------------------
 LAT_MIN, LAT_MAX = -11, 6
 LON_MIN, LON_MAX = 94, 141
-MODEL_RUN_HOUR = "00"
-BASE_URL = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod"
+MODEL_NAME = "GFS 0.25°"
+DATA_URL = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/gfs.20250815/00/atmos/gfs.t00z.pgrb2.0p25.f003"  # contoh file GRIB
 
-# ==========================
-# Fungsi unduh data
-# ==========================
-@st.cache_data
-def download_gfs(run_date, run_hour):
-    file_url = f"{BASE_URL}/gfs.{run_date}/{run_hour}/atmos/gfs.t{run_hour}z.pgrb2.0p25.f000"
-    local_file = f"gfs_{run_date}_{run_hour}.grib2"
-    if not os.path.exists(local_file):
-        r = requests.get(file_url, stream=True)
-        if r.status_code != 200:
-            return None
-        with open(local_file, "wb") as f:
-            for chunk in r.iter_content(1024):
-                f.write(chunk)
-    return local_file
+st.set_page_config(page_title="IBF Helper — Cuaca 3 Jam-an", layout="wide")
+st.title("🌧️ Dashboard Parameter Cuaca 3 Jam-an — IBF Helper")
+st.caption(f"Model: {MODEL_NAME} | Wilayah: Indonesia ({LAT_MIN}° s/d {LAT_MAX}° Lat, {LON_MIN}° s/d {LON_MAX}° Lon)")
 
-@st.cache_data
-def load_var(file_path, filter_keys):
+# --------------------------
+# Fungsi Bantu
+# --------------------------
+def load_grib_param(url, filter_keys):
+    """Load GRIB parameter dengan filter aman dan cetak dimensi."""
     try:
-        ds = xr.open_dataset(file_path, engine="cfgrib", filter_by_keys=filter_keys)
-        ds = ds.sel(latitude=slice(LAT_MAX, LAT_MIN), longitude=slice(LON_MIN, LON_MAX))
+        ds = xr.open_dataset(url, engine="cfgrib", filter_by_keys=filter_keys)
+        st.sidebar.write(f"✅ Loaded {filter_keys} | dims: {list(ds.dims)}")
         return ds
     except Exception as e:
-        st.error(f"Error buka GRIB2 ({filter_keys}): {e}")
+        st.sidebar.write(f"⚠️ Gagal load {filter_keys}: {e}")
         return None
 
-# ==========================
-# UI
-# ==========================
-st.set_page_config(page_title="🌧️ IBF Dashboard 3 Jam-an (Indonesia)", layout="wide")
-st.title("🌧️ Dashboard Parameter Cuaca 3 Jam-an — IBF Helper")
-st.markdown(f"**Model:** GFS 0.25° | **Wilayah:** Indonesia ({LAT_MIN}° s/d {LAT_MAX}° Lat, {LON_MIN}° s/d {LON_MAX}° Lon)")
+def get_time_dim(ds):
+    """Cari dimensi waktu yang ada."""
+    for cand in ["time", "valid_time", "step"]:
+        if cand in ds.dims or cand in ds.coords:
+            return cand
+    return None
 
-today = datetime.utcnow()
-run_date = today.strftime("%Y%m%d")
-local_file = download_gfs(run_date, MODEL_RUN_HOUR)
+def extract_values(ds, var_name):
+    """Ambil nilai dari dataset secara aman."""
+    if ds is None or var_name not in ds:
+        return None, None
+    tdim = get_time_dim(ds)
+    if tdim is None:
+        st.sidebar.write(f"⚠️ Tidak ada dimensi waktu di {var_name}")
+        return None, None
+    values = ds[var_name].isel({tdim: 0})
+    return values, tdim
 
-if local_file:
-    temp_ds = load_var(local_file, {'typeOfLevel': 'heightAboveGround', 'level': 2})
-    wind_ds = load_var(local_file, {'typeOfLevel': 'heightAboveGround', 'level': 10})
-    rain_ds = load_var(local_file, {'typeOfLevel': 'surface'})
+# --------------------------
+# Load Parameter
+# --------------------------
+params = {
+    "temp2m": {"name": "Suhu 2m (°C)", "filter": {"typeOfLevel": "heightAboveGround", "level": 2}, "var": "t2m"},
+    "precip": {"name": "Curah Hujan (mm)", "filter": {"typeOfLevel": "surface"}, "var": "tp"},
+    "wind10m": {"name": "Angin 10m (m/s)", "filter": {"typeOfLevel": "heightAboveGround", "level": 10}, "var": "ws10"},
+    "cloud": {"name": "Tutupan Awan (%)", "filter": {"typeOfLevel": "cloud"}, "var": "tcc"},
+    "vis": {"name": "Visibility (m)", "filter": {"typeOfLevel": "surface"}, "var": "vis"},
+}
 
-    if temp_ds is not None:
-        temp2m = temp_ds['t2m'] - 273.15
-        st.subheader("📍 Suhu 2m (°C) — waktu pertama")
+for key, cfg in params.items():
+    ds = load_grib_param(DATA_URL, cfg["filter"])
+    values, tdim = extract_values(ds, cfg["var"])
+    if values is not None:
+        st.subheader(cfg["name"])
         st.map(pd.DataFrame({
-            "lat": temp2m.latitude.values.repeat(len(temp2m.longitude)),
-            "lon": np.tile(temp2m.longitude.values, len(temp2m.latitude)),
-            "value": temp2m.isel(time=0).values.flatten()
+            "lat": values.latitude.values.flatten(),
+            "lon": values.longitude.values.flatten(),
+            "value": values.values.flatten()
         }))
+    else:
+        st.warning(f"Data {cfg['name']} tidak tersedia.")
 
-    if wind_ds is not None:
-        u10 = wind_ds['u10']
-        v10 = wind_ds['v10']
-        wind_speed = np.sqrt(u10**2 + v10**2)
-        st.subheader("💨 Kecepatan Angin 10m (m/s) — waktu pertama")
-        st.map(pd.DataFrame({
-            "lat": wind_speed.latitude.values.repeat(len(wind_speed.longitude)),
-            "lon": np.tile(wind_speed.longitude.values, len(wind_speed.latitude)),
-            "value": wind_speed.isel(time=0).values.flatten()
-        }))
-else:
-    st.error("Gagal mengunduh data GFS.")
+st.success("✅ Selesai memuat parameter cuaca")
