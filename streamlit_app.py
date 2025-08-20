@@ -2,7 +2,7 @@ import streamlit as st
 import xarray as xr
 import numpy as np
 import pydeck as pdk
-from datetime import datetime, timedelta
+from datetime import datetime
 
 st.set_page_config(
     page_title="Dashboard Curah Hujan 3 Jam-an — IBF Helper",
@@ -13,16 +13,16 @@ st.title("🌧️ Dashboard Curah Hujan 3 Jam-an — IBF Helper (GFS 0.25°)")
 st.caption("Sumber data: GFS via NOMADS | Domain: -5°LS s.d -9°LS, 110°BT s.d 115°BT")
 
 # ==============================================================
-# 1. Tentukan run otomatis (tanpa scraping)
+# 1. Tentukan run otomatis (tanpa requests.get)
 # ==============================================================
 
 utc_now = datetime.utcnow()
 date = utc_now.strftime("%Y%m%d")
-cycle = f"{(utc_now.hour // 6) * 6:02d}"   # 00, 06, 12, 18
+cycle = f"{(utc_now.hour // 6) * 6:02d}"   # Pilih 00, 06, 12, 18
 
 base_url = f"https://nomads.ncep.noaa.gov:9090/dods/gfs_0p25/gfs{date}/gfs_0p25_{cycle}z"
 
-st.info(f"Run GFS: {date} {cycle}Z (UTC)")
+st.info(f"Run GFS otomatis: {date} {cycle}Z (UTC)")
 
 # ==============================================================
 # 2. Load dataset langsung via xarray
@@ -34,10 +34,10 @@ try:
     # Batas domain
     ds = ds.sel(lat=slice(-5, -9), lon=slice(110, 115))
 
-    # Ambil parameter curah hujan (tp = total precipitation)
+    # Ambil parameter curah hujan
     if "prate_surface" in ds.variables:
         var_name = "prate_surface"
-        data = ds[var_name] * 10800  # prate (kg/m2/s) → mm/3jam (kg/m2 ≈ mm)
+        data = ds[var_name] * 10800  # prate (kg/m2/s) → mm/3 jam
     elif "tp" in ds.variables:
         var_name = "tp"
         data = ds[var_name]
