@@ -2,85 +2,68 @@ import streamlit as st
 import xarray as xr
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import cartopy.crs as ccrs
-import requests
-import os
-import cfgrib
-from datetime import datetime, timedelta
+import pydeck as pdk
 
-# -------------------------------
-# CONFIG
-# -------------------------------
-MODEL_BASE_URL = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/"
-RESOLUTION = "0p25"
-FORECAST_HOUR = 3
-LAT_RANGE = (-11, 6)
-LON_RANGE = (94, 141)
+# -------------------
+# Fungsi ambil data GFS
+# -------------------
+def load_gfs_precip(run="00", date="20250820"):
+    url = f"https://nomads.ncep.noaa.gov/dods/gfs_0p25/gfs{date}/gfs_0p25_{run}z"
+    ds = xr.open_dataset(url)
+    return ds
 
-# -------------------------------
-# HELPER FUNCTIONS
-# -------------------------------
-def get_latest_run():
-    now = datetime.utcnow()
-    for offset in range(0, 24, 6):  
-        run_time = now - timedelta(hours=offset)
-        run_str = run_time.strftime("%Y%m%d/%H")
-        url = f"{MODEL_BASE_URL}gfs.{run_time.strftime('%Y%m%d')}/{run_time.strftime('%H')}/atmos/"
-        try:
-            r = requests.head(url, timeout=5)
-            if r.status_code == 200:
-                return run_time
-        except:
-            pass
-    return None
+# -------------------
+# Main App
+# -------------------
+st.title("🌧️ Dashboard Curah Hujan 3 Jam-an (GFS 0.25°)")
 
-def load_gfs_param(run_time, filter_keys, var_candidates):
-    f003 = f"gfs.t{run_time.strftime('%H')}z.pgrb2.{RESOLUTION}.f{FORECAST_HOUR:03d}"
-    url = f"{MODEL_BASE_URL}gfs.{run_time.strftime('%Y%m%d')}/{run_time.strftime('%H')}/atmos/{f003}"
-    try:
-        ds = xr.open_dataset(url, engine="cfgrib", backend_kwargs={"filter_by_keys": filter_keys})
-        for var in var_candidates:
-            if var in ds:
-                return ds[var]
-    except Exception as e:
-        st.warning(f"⚠️ Gagal load {filter_keys}: {e}")
-    return None
+date = pd.Timestamp.today().strftime("%Y%m%d")
+run = "00"
 
-# -------------------------------
-# STREAMLIT UI
-# -------------------------------
-st.set_page_config(page_title="🌧️ Dashboard Cuaca GFS Indonesia", layout="wide")
-
-st.title("🌧️ Dashboard Parameter Cuaca 3 Jam-an — IBF Helper (GFS 0.25°)")
-
-st.write("Memuat parameter... ini bisa memakan waktu beberapa detik per parameter.")
-
-run_time = get_latest_run()
-if not run_time:
-    st.error("Tidak ada run GFS terbaru yang tersedia.")
+try:
+    ds = load_gfs_precip(run=run, date=date)
+except:
+    st.error("⚠️ Data GFS tidak bisa dimuat.")
     st.stop()
 
-st.success(f"Model GFS {RESOLUTION} | Run: {run_time.strftime('%Y-%m-%d %H UTC')}")
+# Ambil variabel curah hujan kumulatif
+tp = ds["prate_surface"]  # rainfall rate (kg/m2/s)
+# GFS kadang `prate_surface` atau `tp`
+tp = tp * 10800  # konversi ke mm/3 jam (prate = kg/m2/s → mm/s)
 
-# Load parameters
-params = {
-    "Suhu 2m (°C)": load_gfs_param(run_time, {"typeOfLevel": "heightAboveGround", "level": 2}, ["t2m", "2t", "t"]),
-    "Curah Hujan (mm)": load_gfs_param(run_time, {"typeOfLevel": "surface"}, ["tp", "prate", "precip"]),
-    "Angin 10m (m/s)": load_gfs_param(run_time, {"typeOfLevel": "heightAboveGround", "level": 10}, ["10u", "u10", "v10"]),
-    "Tutupan Awan (%)": load_gfs_param(run_time, {"typeOfLevel": "cloud"}, ["tcc", "cloud"]),
-    "Visibility (m)": load_gfs_param(run_time, {"typeOfLevel": "surface"}, ["vis"]),
-}
+# Subset Indonesia
+tp = tp.sel(lat=slice(6, -11), lon=slice(94, 141))
 
-for name, data in params.items():
-    if data is None:
-        st.warning(f"Data {name} tidak tersedia.")
-    else:
-        st.subheader(name)
-        plt.figure(figsize=(8, 6))
-        ax = plt.axes(projection=ccrs.PlateCarree())
-        ax.coastlines()
-        data.plot(ax=ax, transform=ccrs.PlateCarree())
-        st.pyplot(plt)
+times = pd.to_datetime(tp["time"].values)
 
-st.success("✅ Selesai memuat parameter cuaca")
+# Slider pilih jam
+t_index = st.slider("Pilih waktu", 0, len(times)-1, 0)
+t_sel = times[t_index]
+data = tp.isel(time=t_index)
+
+# Siapkan dataframe untuk pydeck
+df = pd.DataFrame({
+    "lat": data["lat"].values.repeat(len(data["lon"])),
+    "lon": np.tile(data["lon"].values, len(data["lat"])),
+    "CH": data.values.flatten()
+})
+
+# Map dengan pydeck
+st.pydeck_chart(pdk.Deck(
+    map_style="mapbox://styles/mapbox/light-v9",
+    initial_view_state=pdk.ViewState(
+        latitude=-2, longitude=118, zoom=4
+    ),
+    layers=[
+        pdk.Layer(
+            "HeatmapLayer",
+            data=df,
+            get_position=["lon", "lat"],
+            get_weight="CH",
+            radiusPixels=25,
+            aggregation=pdk.types.String("SUM")
+        )
+    ],
+))
+
+st.caption(f"⏰ Waktu: {t_sel} | CH dalam 3 jam (mm)")
