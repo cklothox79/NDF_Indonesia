@@ -1,120 +1,178 @@
-# streamlit_app.py
+# 🌤️ Dashboard Cuaca Perjalanan Multi-Parameter
+# Editor: Ferri Kusuma (M8TB_14.22.0003)
 
 import streamlit as st
-import xarray as xr
-import numpy as np
+import requests
 import pandas as pd
-import pydeck as pdk
-from datetime import datetime
+from datetime import date
+from streamlit_folium import st_folium
+import folium
+import plotly.graph_objects as go
 
-# ==============================================================
-# Konfigurasi halaman
-# ==============================================================
-st.set_page_config(
-    page_title="Dashboard Curah Hujan 3 Jam-an — IBF Helper",
-    layout="wide"
-)
+st.set_page_config(page_title="Dashboard Cuaca Multi-Parameter", layout="wide")
 
-st.title("🌧️ Dashboard Curah Hujan 3 Jam-an — IBF Helper (GFS 0.25°)")
-st.caption("Sumber data: GFS via NOMADS | Domain: -5°LS s.d -9°LS, 110°BT s.d 115°BT")
+# =======================
+# Judul
+# =======================
+st.markdown("<h1 style='font-size:36px;'>🌤️ Dashboard Cuaca Multi-Parameter</h1>", unsafe_allow_html=True)
+st.markdown("<p style='font-size:18px; color:gray;'><em>Editor: Ferri Kusuma (M8TB_14.22.0003)</em></p>", unsafe_allow_html=True)
+st.markdown("<p style='font-size:17px;'>Visualisasi prakiraan suhu, hujan, awan, kelembapan, angin, dan visibility.</p>", unsafe_allow_html=True)
 
-# ==============================================================
-# Build URL otomatis
-# ==============================================================
-utc_now = datetime.utcnow()
-date = utc_now.strftime("%Y%m%d")
-cycle = f"{(utc_now.hour // 6) * 6:02d}"   # pilih jam 00, 06, 12, 18
+# =======================
+# Input
+# =======================
+col1, col2 = st.columns([2, 1])
+with col1:
+    kota = st.text_input("📝 Masukkan nama kota (opsional):")
+with col2:
+    tanggal = st.date_input("📅 Pilih tanggal perjalanan:", value=date.today(), min_value=date.today())
 
-base_url = f"https://nomads.ncep.noaa.gov:9090/dods/gfs_0p25/gfs{date}/gfs_0p25_{cycle}z"
-st.info(f"Run GFS otomatis: {date} {cycle}Z (UTC)")
+# =======================
+# Fungsi koordinat (OpenStreetMap + fallback)
+# =======================
+@st.cache_data(show_spinner=False)
+def get_coordinates(nama_kota):
+    try:
+        url = f"https://nominatim.openstreetmap.org/search?q={nama_kota}&format=json&limit=1"
+        headers = {"User-Agent": "cuaca-perjalanan-app"}
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        hasil = r.json()
+        if hasil:
+            return float(hasil[0]["lat"]), float(hasil[0]["lon"])
+        else:
+            st.warning("⚠️ Kota tidak ditemukan.")
+            return None, None
+    except:
+        fallback_kota = {
+            "mojokerto": (-7.4722, 112.4333),
+            "surabaya": (-7.2575, 112.7521),
+            "sidoarjo": (-7.45, 112.7167),
+            "malang": (-7.9839, 112.6214),
+            "jakarta": (-6.2, 106.8),
+            "bandung": (-6.9147, 107.6098),
+            "semarang": (-6.9667, 110.4167),
+        }
+        nama = nama_kota.strip().lower()
+        if nama in fallback_kota:
+            st.info("🔁 Menggunakan koordinat lokal karena koneksi API gagal.")
+            return fallback_kota[nama]
+        else:
+            return None, None
 
-# ==============================================================
-# Buka dataset GFS
-# ==============================================================
-try:
-    ds = xr.open_dataset(base_url)
-except Exception as e:
-    st.error(f"Gagal membuka dataset: {e}")
-    st.stop()
+lat, lon = None, None
 
-# ==============================================================
-# Ambil variabel curah hujan
-# ==============================================================
-if "tp" in ds.variables:
-    var = ds["tp"]  # total precipitation (meter)
-else:
-    st.error("Variabel 'tp' (total precipitation) tidak ditemukan di dataset.")
-    st.stop()
+# =======================
+# Peta Lokasi
+# =======================
+st.markdown("<h3 style='font-size:20px;'>🗺️ Klik lokasi di peta atau masukkan nama kota</h3>", unsafe_allow_html=True)
+default_location = [-2.5, 117.0]
+m = folium.Map(location=default_location, zoom_start=5)
 
-# Domain
-lat_min, lat_max = -9, -5
-lon_min, lon_max = 110, 115
-var = var.sel(latitude=slice(lat_max, lat_min), longitude=slice(lon_min, lon_max))
+if kota:
+    lat, lon = get_coordinates(kota)
+    if lat and lon:
+        folium.Marker([lat, lon], tooltip=f"📍 {kota.title()}").add_to(m)
+        m.location = [lat, lon]
+        m.zoom_start = 9
 
-# Konversi m → mm
-var_mm = var * 1000
+m.add_child(folium.LatLngPopup())
+map_data = st_folium(m, height=400, use_container_width=True)
 
-# ==============================================================
-# Slider waktu
-# ==============================================================
-times = pd.to_datetime(var_mm.time.values)
+if map_data and map_data["last_clicked"]:
+    lat = map_data["last_clicked"]["lat"]
+    lon = map_data["last_clicked"]["lng"]
+    st.success(f"📍 Lokasi dari peta: {lat:.4f}, {lon:.4f}")
 
-# Tambah slider interaktif
-time_index = st.slider("Geser untuk memilih waktu prakiraan (UTC)",
-                       min_value=0, max_value=len(times)-1, value=0, step=1)
-
-selected_time = times[time_index]
-st.success(f"Menampilkan prakiraan pada {selected_time} UTC")
-
-# Ambil data
-da = var_mm.sel(time=selected_time)
-
-# ==============================================================
-# Siapkan dataframe untuk pydeck
-# ==============================================================
-df = da.to_dataframe(name="rain").reset_index()
-df["rain"] = df["rain"].fillna(0)
-df["rain_clip"] = np.clip(df["rain"], 0, 50)  # batas 0–50 mm
-
-# ==============================================================
-# Layer pydeck
-# ==============================================================
-layer = pdk.Layer(
-    "HeatmapLayer",
-    data=df,
-    get_position=["longitude", "latitude"],
-    get_weight="rain_clip",
-    radiusPixels=60,
-    aggregation=pdk.types.String("MEAN")
-)
-
-# View
-view_state = pdk.ViewState(
-    latitude=-7,
-    longitude=112.5,
-    zoom=6.5,
-    pitch=0
-)
-
-# Render map
-st.pydeck_chart(
-    pdk.Deck(
-        map_style="mapbox://styles/mapbox/light-v9",
-        layers=[layer],
-        initial_view_state=view_state,
-        tooltip={"text": "Lat: {latitude}, Lon: {longitude}\nCH: {rain} mm"}
+# =======================
+# Fungsi ambil cuaca Open-Meteo
+# =======================
+def get_hourly_weather(lat, lon, tanggal):
+    tgl = tanggal.strftime("%Y-%m-%d")
+    url = (
+        f"https://api.open-meteo.com/v1/forecast?"
+        f"latitude={lat}&longitude={lon}"
+        f"&hourly=temperature_2m,precipitation,cloudcover,visibility,"
+        f"windspeed_10m,winddirection_10m"
+        f"&timezone=auto&start_date={tgl}&end_date={tgl}"
     )
-)
+    r = requests.get(url)
+    return r.json() if r.status_code == 200 else None
 
-# ==============================================================
-# Legend
-# ==============================================================
-st.markdown(
-    """
-    **Legenda Curah Hujan (mm / 3 jam):**  
-    🔵 Biru muda = 0 mm  
-    🟢 Hijau = 10 mm  
-    🟡 Kuning = 25 mm  
-    🔴 Merah tua = ≥50 mm
-    """
-)
+# =======================
+# Tampilkan data
+# =======================
+if lat and lon and tanggal:
+    data = get_hourly_weather(lat, lon, tanggal)
+    if data and "hourly" in data:
+        d = data["hourly"]
+        waktu = d["time"]
+        jam_labels = [w[-5:] for w in waktu]
+
+        # Dataframe
+        df = pd.DataFrame({
+            "Waktu": waktu,
+            "Suhu (°C)": d["temperature_2m"],
+            "Hujan (mm)": d["precipitation"],
+            "Awan (%)": d["cloudcover"],
+            "Visibility (m)": d["visibility"],
+            "Kecepatan Angin (m/s)": d["windspeed_10m"],
+            "Arah Angin (°)": d["winddirection_10m"],
+        })
+
+        # Tabs untuk visualisasi
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(
+            ["🌡️ Suhu", "🌧️ Curah Hujan", "💨 Angin", "☁️ Awan", "👀 Visibility"]
+        )
+
+        with tab1:
+            st.subheader("🌡️ Suhu per jam")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=jam_labels, y=df["Suhu (°C)"], line=dict(color="red")))
+            fig.update_layout(xaxis_title="Jam", yaxis_title="Suhu (°C)")
+            st.plotly_chart(fig, use_container_width=True)
+
+        with tab2:
+            st.subheader("🌧️ Curah Hujan per jam")
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=jam_labels, y=df["Hujan (mm)"], marker_color="blue"))
+            fig.update_layout(xaxis_title="Jam", yaxis_title="Hujan (mm)")
+            st.plotly_chart(fig, use_container_width=True)
+
+        with tab3:
+            st.subheader("💨 Angin")
+            fig_angin = go.Figure()
+            fig_angin.add_trace(go.Barpolar(
+                r=df["Kecepatan Angin (m/s)"],
+                theta=df["Arah Angin (°)"],
+                name="Arah & Kecepatan Angin",
+                opacity=0.85
+            ))
+            fig_angin.update_layout(
+                polar=dict(angularaxis=dict(direction="clockwise", rotation=90)),
+                height=500
+            )
+            st.plotly_chart(fig_angin, use_container_width=True)
+
+        with tab4:
+            st.subheader("☁️ Awan per jam")
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=jam_labels, y=df["Awan (%)"], marker_color="gray"))
+            fig.update_layout(xaxis_title="Jam", yaxis_title="Awan (%)")
+            st.plotly_chart(fig, use_container_width=True)
+
+        with tab5:
+            st.subheader("👀 Visibility per jam")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=jam_labels, y=df["Visibility (m)"], line=dict(color="green")))
+            fig.update_layout(xaxis_title="Jam", yaxis_title="Visibility (m)")
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Tabel
+        st.markdown("### 📊 Data Lengkap")
+        st.dataframe(df, use_container_width=True)
+        csv = df.to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Unduh Data (CSV)", data=csv, file_name="cuaca_per_jam.csv", mime="text/csv")
+
+    else:
+        st.error("❌ Data cuaca tidak tersedia.")
