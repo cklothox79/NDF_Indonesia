@@ -1,9 +1,15 @@
+# streamlit_app.py
+
 import streamlit as st
 import xarray as xr
 import numpy as np
+import pandas as pd
 import pydeck as pdk
 from datetime import datetime
 
+# ==============================================================
+# Konfigurasi halaman
+# ==============================================================
 st.set_page_config(
     page_title="Dashboard Curah Hujan 3 Jam-an — IBF Helper",
     layout="wide"
@@ -13,71 +19,98 @@ st.title("🌧️ Dashboard Curah Hujan 3 Jam-an — IBF Helper (GFS 0.25°)")
 st.caption("Sumber data: GFS via NOMADS | Domain: -5°LS s.d -9°LS, 110°BT s.d 115°BT")
 
 # ==============================================================
-# 1. Tentukan run otomatis (tanpa requests.get)
+# Build URL otomatis (tanpa requests.get)
 # ==============================================================
-
 utc_now = datetime.utcnow()
 date = utc_now.strftime("%Y%m%d")
-cycle = f"{(utc_now.hour // 6) * 6:02d}"   # Pilih 00, 06, 12, 18
+cycle = f"{(utc_now.hour // 6) * 6:02d}"   # pilih jam 00, 06, 12, 18
 
 base_url = f"https://nomads.ncep.noaa.gov:9090/dods/gfs_0p25/gfs{date}/gfs_0p25_{cycle}z"
-
 st.info(f"Run GFS otomatis: {date} {cycle}Z (UTC)")
 
 # ==============================================================
-# 2. Load dataset langsung via xarray
+# Buka dataset GFS
 # ==============================================================
-
 try:
     ds = xr.open_dataset(base_url)
+except Exception as e:
+    st.error(f"Gagal membuka dataset: {e}")
+    st.stop()
 
-    # Batas domain
-    ds = ds.sel(lat=slice(-5, -9), lon=slice(110, 115))
+# ==============================================================
+# Ambil variabel curah hujan (tp)
+# ==============================================================
+if "tp" in ds.variables:
+    var = ds["tp"]  # total precipitation (akumulasi, meter)
+else:
+    st.error("Variabel 'tp' (total precipitation) tidak ditemukan di dataset.")
+    st.stop()
 
-    # Ambil parameter curah hujan
-    if "prate_surface" in ds.variables:
-        var_name = "prate_surface"
-        data = ds[var_name] * 10800  # prate (kg/m2/s) → mm/3 jam
-    elif "tp" in ds.variables:
-        var_name = "tp"
-        data = ds[var_name]
-    else:
-        st.error("❌ Variabel curah hujan tidak ditemukan di dataset GFS.")
-        st.stop()
+# Domain: -5°LS s.d -9°LS (lat), 110°BT s.d 115°BT (lon)
+lat_min, lat_max = -9, -5
+lon_min, lon_max = 110, 115
 
-    times = ds["time"].values
+var = var.sel(latitude=slice(lat_max, lat_min), longitude=slice(lon_min, lon_max))
 
-    # Pilih waktu
-    idx = st.slider("Pilih indeks waktu (3 jam-an)", 0, len(times)-1, 0)
-    arr = data.isel(time=idx)
+# Konversi dari meter ke mm
+var_mm = var * 1000
 
-    # Konversi ke dataframe
-    df = arr.to_dataframe().reset_index()
-    df = df.rename(columns={var_name: "rain"})
+# ==============================================================
+# Buat opsi waktu (per 3 jam)
+# ==============================================================
+times = pd.to_datetime(var_mm.time.values)
+selected_time = st.selectbox("Pilih waktu prakiraan (UTC)", times)
 
-    # ==============================================================
-    # 3. Visualisasi dengan pydeck
-    # ==============================================================
+da = var_mm.sel(time=selected_time)
 
-    layer = pdk.Layer(
-        "HeatmapLayer",
-        data=df,
-        get_position=["lon", "lat"],
-        get_weight="rain",
-        radiusPixels=30,
-    )
+# ==============================================================
+# Siapkan data untuk pydeck
+# ==============================================================
+df = da.to_dataframe(name="rain").reset_index()
+df["rain"] = df["rain"].fillna(0)
 
-    view_state = pdk.ViewState(
-        latitude=-7.0, longitude=112.5, zoom=6
-    )
+# Normalisasi untuk warna (0 mm = biru muda, >50 mm = merah tua)
+df["rain_clip"] = np.clip(df["rain"], 0, 50)
 
-    st.pydeck_chart(pdk.Deck(
+# ==============================================================
+# Pydeck Layer
+# ==============================================================
+layer = pdk.Layer(
+    "HeatmapLayer",
+    data=df,
+    get_position=["longitude", "latitude"],
+    get_weight="rain_clip",
+    radiusPixels=60,
+    aggregation=pdk.types.String("MEAN")
+)
+
+# View
+view_state = pdk.ViewState(
+    latitude=-7,
+    longitude=112.5,
+    zoom=6.5,
+    pitch=0
+)
+
+# Render map
+st.pydeck_chart(
+    pdk.Deck(
+        map_style="mapbox://styles/mapbox/light-v9",
         layers=[layer],
         initial_view_state=view_state,
-        map_style="mapbox://styles/mapbox/light-v9"
-    ))
+        tooltip={"text": "Lat: {latitude}, Lon: {longitude}\nCH: {rain} mm"}
+    )
+)
 
-    st.success(f"Peta curah hujan (mm/3 jam) untuk waktu {str(times[idx])}")
-
-except Exception as e:
-    st.error(f"⚠️ Gagal load data GFS: {e}")
+# ==============================================================
+# Legend sederhana
+# ==============================================================
+st.markdown(
+    """
+    **Legenda Curah Hujan (mm / 3 jam):**  
+    🔵 Biru muda = 0 mm  
+    🟢 Hijau = 10 mm  
+    🟡 Kuning = 25 mm  
+    🔴 Merah tua = ≥50 mm
+    """
+)
