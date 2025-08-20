@@ -1,9 +1,7 @@
 streamlit
-cfgrib
 xarray
 pandas
 numpy
-matplotlib
-cartopy
-requests
-pygrib
+pydeck
+netCDF4
+pydap
