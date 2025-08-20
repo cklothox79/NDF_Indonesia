@@ -3,6 +3,8 @@ import xarray as xr
 import pandas as pd
 import numpy as np
 import pydeck as pdk
+import requests
+import re
 
 # -----------------------------
 # Konfigurasi halaman
@@ -13,11 +15,37 @@ st.title("🌧️ Dashboard Curah Hujan 3 Jam-an — IBF Helper (GFS 0.25°)")
 st.caption("Sumber data: GFS via NOMADS | Wilayah: Indonesia (-11° s/d 6° Lat, 94° s/d 141° Lon)")
 
 # -----------------------------
-# URL Dataset GFS (OpenDAP NOMADS)
+# Fungsi cari run terbaru di NOMADS
 # -----------------------------
-run = "20250815/00"   # <-- sementara fixed, bisa nanti diubah ke auto terbaru
-base_url = f"https://nomads.ncep.noaa.gov:9090/dods/gfs_0p25/gfs{run}/gfs_0p25_{run[-2:]}z"
+def get_latest_run():
+    url = "https://nomads.ncep.noaa.gov:9090/dods/gfs_0p25/"
+    r = requests.get(url).text
+    # Cari folder dengan pola gfsYYYYMMDD
+    dates = re.findall(r"gfs(\d{8})/", r)
+    if not dates:
+        return None, None
+    latest_date = sorted(dates)[-1]
+    # Ambil cycle (00, 06, 12, 18)
+    r2 = requests.get(url + f"gfs{latest_date}/").text
+    cycles = re.findall(r"gfs{}/(\d{{2}})z/".format(latest_date), r2)
+    if not cycles:
+        return None, None
+    latest_cycle = sorted(cycles)[-1]
+    run = f"gfs{latest_date}/{latest_cycle}z"
+    return latest_date, latest_cycle
 
+date, cycle = get_latest_run()
+if not date:
+    st.error("Gagal mendapatkan run terbaru dari NOMADS.")
+    st.stop()
+
+base_url = f"https://nomads.ncep.noaa.gov:9090/dods/gfs_0p25/gfs{date}/gfs_0p25_{cycle}z"
+
+st.info(f"📡 Menggunakan run terbaru: {date} {cycle}Z")
+
+# -----------------------------
+# Load dataset
+# -----------------------------
 try:
     ds = xr.open_dataset(base_url)
 except Exception as e:
@@ -36,7 +64,7 @@ if "prate_surface" not in ds.variables:
 ch = ds["prate_surface"] * 10800  
 ch = ch.sel(lat=slice(6, -11), lon=slice(94, 141))  # crop domain Indonesia
 
-# Ambil waktu
+# Ambil waktu valid
 times = pd.to_datetime(ds["time"].values) + pd.to_timedelta(ds["step"].values)
 ch["valid_time"] = ("time", times)
 
