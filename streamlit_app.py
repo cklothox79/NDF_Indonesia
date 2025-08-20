@@ -12,7 +12,7 @@ import re
 st.set_page_config(page_title="Dashboard CH 3-jam | IBF Helper", layout="wide")
 
 st.title("🌧️ Dashboard Curah Hujan 3 Jam-an — IBF Helper (GFS 0.25°)")
-st.caption("Sumber data: GFS via NOMADS | Wilayah: Indonesia (-11° s/d 6° Lat, 94° s/d 141° Lon)")
+st.caption("Sumber data: GFS via NOMADS | Domain: -5°LS s.d -9°LS, 110°BT s.d 115°BT")
 
 # -----------------------------
 # Fungsi cari run terbaru di NOMADS
@@ -62,7 +62,9 @@ if "prate_surface" not in ds.variables:
 # prate_surface = precipitation rate (kg/m2/s)
 # konversi ke mm/3 jam (1 kg/m2 = 1 mm)
 ch = ds["prate_surface"] * 10800  
-ch = ch.sel(lat=slice(6, -11), lon=slice(94, 141))  # crop domain Indonesia
+
+# Crop ke domain spesifik
+ch = ch.sel(lat=slice(-5, -9), lon=slice(110, 115))  
 
 # Ambil waktu valid
 times = pd.to_datetime(ds["time"].values) + pd.to_timedelta(ds["step"].values)
@@ -98,17 +100,17 @@ layer = pdk.Layer(
     data=df,
     get_position='[lon, lat]',
     get_weight="ch",
-    radiusPixels=30,
+    radiusPixels=60,
     aggregation=pdk.types.String("SUM")
 )
 
 view_state = pdk.ViewState(
-    latitude=-2,
-    longitude=118,
-    zoom=4,
+    latitude=-7,
+    longitude=112.5,
+    zoom=6,
     pitch=0
 )
 
 st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state))
 
-st.success("✅ Peta CH berhasil dimuat")
+st.success("✅ Peta CH (mm/3 jam) berhasil dimuat")
